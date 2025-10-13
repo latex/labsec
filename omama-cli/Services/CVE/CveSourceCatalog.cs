@@ -9,7 +9,8 @@ public static class CveSourceCatalog
     {
         new("CVE.ORG", "https://www.cve.org/"),
         new("CVEDETAILS", "https://www.cvedetails.com/"),
-        new("NVD", "https://nvd.nist.gov/", BuiltIn: true),
+    // Use the NVD REST API endpoint to ensure JSON responses
+    new("NVD", "https://services.nvd.nist.gov/rest/json/cves/2.0", BuiltIn: true),
         new("VULNERS", "https://vulners.com/"),
         new("VULDB", "https://vuldb.com/"),
         new("WIZ", "https://www.wiz.io/pt-br/vulnerability-database"),

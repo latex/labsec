@@ -5,6 +5,15 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using System.Globalization;
 
+// Variável global de ambiente: "homol" ou "prod"
+var stat = Environment.GetEnvironmentVariable("OMAMA_STAT") ?? "prod";
+
+void Log(string msg)
+{
+    if (stat == "homol")
+        Console.WriteLine($"[LOG] {msg}");
+}
+
 static void PrintHelp()
 {
     Console.WriteLine("Omama CLI - Gerenciador de Diretivas");
@@ -18,6 +27,8 @@ static void PrintHelp()
     Console.WriteLine("  omama-cli delete --name <nome>");
     Console.WriteLine("  omama-cli sync [--keyword <kw> | --latest <n>] [--force] [--json]");
     Console.WriteLine("  omama-cli sync slow [--batch <n>] [--force] [--maxPerHour <n>] [--concurrency <n>] [--json]");
+    Console.WriteLine("  omama-cli stats source [--json]");
+    Console.WriteLine("  omama-cli count");
 }
 
 static Dictionary<string, string> ParseOptions(string[] args, int startIndex)
@@ -67,8 +78,40 @@ if (args.Length == 0 || args[0] == "-h" || args[0] == "--help")
 var command = args[0].ToLowerInvariant();
 try
 {
+    // Write PID file to indicate the app is running
+    try
+    {
+        var runDir = CachePaths.ResolveRunDir();
+        var pidFile = Path.Combine(runDir, "omama-cli.pid");
+        File.WriteAllText(pidFile, $"{Environment.ProcessId}\n{DateTimeOffset.UtcNow:o}\n");
+    }
+    catch { /* ignore errors writing pid file */ }
+
     switch (command)
     {
+        case "count":
+        {
+            // Conta os CVEs salvos em cache por fonte
+            var opts = ParseOptions(args, 1);
+            var asJson = opts.ContainsKey("json");
+            var cacheDir = CachePaths.ResolveCacheDir();
+            var query = new CveQueryService(cacheDir);
+            var counts = await query.CountSavedBySourceAsync();
+
+            if (asJson)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(counts, new JsonSerializerOptions { WriteIndented = true }));
+            }
+            else
+            {
+                Console.WriteLine("Total de CVEs salvos por fonte (cache):");
+                foreach (var kv in counts.OrderByDescending(k => k.Value))
+                {
+                    Console.WriteLine($"- {kv.Key}: {kv.Value}");
+                }
+            }
+            break;
+        }
         case "add":
         {
             var opts = ParseOptions(args, 1);
@@ -159,7 +202,7 @@ try
                 var pageSize = opt.TryGetValue("pageSize", out var sps) && int.TryParse(sps, out var ips) ? Math.Clamp(ips, 1, 200) : 20;
                 var format = (opt.GetValueOrDefault("format") ?? "text").ToLowerInvariant();
 
-                string cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "omama-cli", "cache");
+                string cacheDir = CachePaths.ResolveCacheDir();
                 var query = new CveQueryService(cacheDir);
                 var options = new CveQueryOptions(q, since, until, severities, minScore, maxScore, sortBy, descending, page, pageSize);
                 var result = await query.ListSavedAsync(options);
@@ -211,6 +254,36 @@ try
             }
             break;
         }
+        case "stats":
+        {
+            if (args.Length > 1 && string.Equals(args[1], "source", StringComparison.OrdinalIgnoreCase))
+            {
+                var asJson = args.Skip(2).Any(a => string.Equals(a, "--json", StringComparison.OrdinalIgnoreCase));
+
+                var options = Options.Create(new CveProviderOptions());
+                var multiFactory = new MultiSourceProviderFactory(options);
+                var providers = multiFactory.CreateNamed();
+
+                var statsSvc = new CveSourceStatsService(providers);
+                var counts = await statsSvc.GetCountsAsync();
+
+                if (asJson)
+                {
+                    Console.WriteLine(JsonSerializer.Serialize(new { counts }, new JsonSerializerOptions { WriteIndented = true }));
+                }
+                else
+                {
+                    Console.WriteLine("Total de CVEs por fonte (quando suportado):");
+                    foreach (var c in counts)
+                    {
+                        Console.WriteLine($"- {c.Name}: {(c.Total.HasValue ? c.Total.Value.ToString() : "desconhecido")}");
+                    }
+                }
+                break;
+            }
+            Console.WriteLine("Subcomando desconhecido para stats. Use: stats source [--json]");
+            break;
+        }
         case "sync":
         {
             // subcomando: sync slow
@@ -223,25 +296,81 @@ try
                 var maxPerHour = opts.TryGetValue("maxPerHour", out var sm) && int.TryParse(sm, out var im) ? Math.Max(1, im) : 500;
                 var concurrency = opts.TryGetValue("concurrency", out var sc) && int.TryParse(sc, out var ic) ? Math.Max(1, ic) : 4;
 
-                var options = Options.Create(new CveProviderOptions());
-                var multiFactory = new MultiSourceProviderFactory(options);
-                var named = multiFactory.CreateNamed();
+                string cacheDir = CachePaths.ResolveCacheDir();
+                var configs = SourceConfigLoader.LoadDefault();
+                var loader = new CveSourceLoader();
+                var http = new HttpClient();
+                var namedProviders = loader.LoadSources(http, configs);
 
-                string cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "omama-cli", "cache");
-                var slow = new CveSlowSyncService(named, cacheDir, maxPerHour, concurrency);
-                var stats = await slow.SyncLatestInterleavedAsync(batch, force);
+                var results = new List<object>();
+                var semaphore = new System.Threading.SemaphoreSlim(4); // max 4 concurrent
+                var syncTasks = namedProviders.Select(async np =>
+                {
+                    await semaphore.WaitAsync();
+                    try
+                    {
+                        Log($"Iniciando sync para fonte: {np.Name}");
+                        var slow = new CveSlowSyncService(new[] { np }, cacheDir, maxPerHour, 1);
+                        try
+                        {
+                            var stats = await slow.SyncLatestInterleavedAsync(batch, force);
+                            Log($"Fonte: {np.Name} - Verificados: {stats.Scanned}, Existentes: {stats.Existed}, Salvos: {stats.Saved}, Erros: {stats.Errors}");
+                            return new {
+                                Source = np.Name,
+                                Scanned = stats.Scanned,
+                                Existed = stats.Existed,
+                                Saved = stats.Saved,
+                                Errors = stats.Errors
+                            };
+                        }
+                        catch (JsonException jex)
+                        {
+                            Log($"Erro de parsing JSON para fonte: {np.Name} - {jex.Message}");
+                            return new {
+                                Source = np.Name,
+                                Scanned = 0,
+                                Existed = 0,
+                                Saved = 0,
+                                Errors = 1
+                            };
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"Erro inesperado para fonte: {np.Name} - {ex.Message}");
+                            return new {
+                                Source = np.Name,
+                                Scanned = 0,
+                                Existed = 0,
+                                Saved = 0,
+                                Errors = 1
+                            };
+                        }
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }).ToList();
+
+                var syncResults = await Task.WhenAll(syncTasks);
+                results.AddRange(syncResults);
 
                 if (asJson)
                 {
-                    Console.WriteLine(JsonSerializer.Serialize(stats, new JsonSerializerOptions { WriteIndented = true }));
+                    Console.WriteLine(JsonSerializer.Serialize(new { results }, new JsonSerializerOptions { WriteIndented = true }));
                 }
                 else
                 {
-                    Console.WriteLine("Slow sync concluído:");
-                    Console.WriteLine($"- Verificados: {stats.Scanned}");
-                    Console.WriteLine($"- Já existentes: {stats.Existed}");
-                    Console.WriteLine($"- Salvos agora: {stats.Saved}");
-                    Console.WriteLine($"- Erros: {stats.Errors}");
+                    Console.WriteLine("Sync por fonte concluído:");
+                    foreach (dynamic r in results)
+                    {
+                        Console.WriteLine($"Fonte: {r.Source}");
+                        Console.WriteLine($"- Verificados: {r.Scanned}");
+                        Console.WriteLine($"- Já existentes: {r.Existed}");
+                        Console.WriteLine($"- Salvos agora: {r.Saved}");
+                        Console.WriteLine($"- Erros: {r.Errors}");
+                        Console.WriteLine(new string('-', 40));
+                    }
                 }
                 break;
             }
@@ -262,7 +391,7 @@ try
             var factory = new CveDataProviderFactory(cveOptions);
             var (provider, _) = factory.Create();
 
-            string cacheDir2 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "omama-cli", "cache");
+            string cacheDir2 = CachePaths.ResolveCacheDir();
             var syncService = new CveSyncService(provider, cacheDir2, cveOptions.Value.MaxParallelProcessing);
 
             var result = await syncService.SyncAsync(keyword, limit, force2);

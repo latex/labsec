@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace omama_cli.Services.CVE;
 
-public class NvdCveProvider : ICveDataProvider
+public class NvdCveProvider : ICveDataProvider, IProvidesCveCount
 {
     private readonly HttpClient _httpClient;
     private readonly string _baseUrl;
@@ -27,6 +27,22 @@ public class NvdCveProvider : ICveDataProvider
         };
     }
 
+    private static bool IsJson(HttpResponseMessage resp)
+        => resp.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true;
+
+    private async Task<T?> ReadJsonAsync<T>(HttpResponseMessage resp, CancellationToken ct = default)
+    {
+        try
+        {
+            await using var stream = await resp.Content.ReadAsStreamAsync(ct);
+            return await JsonSerializer.DeserializeAsync<T>(stream, cancellationToken: ct);
+        }
+        catch (JsonException)
+        {
+            return default;
+        }
+    }
+
     public async Task<Models.CVE?> GetCveByIdAsync(string cveId)
     {
         if (string.IsNullOrWhiteSpace(cveId))
@@ -36,13 +52,16 @@ public class NvdCveProvider : ICveDataProvider
 
         try
         {
-            var response = await _httpClient.GetStringAsync($"{_baseUrl}?cveId={cveId}");
-            var nvdResponse = JsonSerializer.Deserialize<Models.NVD.NvdResponse>(response);
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}?cveId={cveId}");
+            req.Headers.UserAgent.ParseAdd("omama-cli/1.0");
+            using var resp = await _httpClient.SendAsync(req);
+            if (!resp.IsSuccessStatusCode || !IsJson(resp)) return null;
+            var nvdResponse = await ReadJsonAsync<Models.NVD.NvdResponse>(resp);
             
             var vulnerability = nvdResponse?.Vulnerabilities.FirstOrDefault();
             return vulnerability == null ? null : ConvertToCve(vulnerability);
         }
-        catch (HttpRequestException)
+        catch
         {
             return null;
         }
@@ -57,12 +76,14 @@ public class NvdCveProvider : ICveDataProvider
 
         try
         {
-            var response = await _httpClient.GetStringAsync($"{_baseUrl}?keywordSearch={keyword}");
-            var nvdResponse = JsonSerializer.Deserialize<Models.NVD.NvdResponse>(response);
-            
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}?keywordSearch={keyword}");
+            req.Headers.UserAgent.ParseAdd("omama-cli/1.0");
+            using var resp = await _httpClient.SendAsync(req);
+            if (!resp.IsSuccessStatusCode || !IsJson(resp)) return Array.Empty<Models.CVE>();
+            var nvdResponse = await ReadJsonAsync<Models.NVD.NvdResponse>(resp);
             return nvdResponse?.Vulnerabilities.Select(ConvertToCve) ?? Array.Empty<Models.CVE>();
         }
-        catch (HttpRequestException)
+        catch
         {
             return Array.Empty<Models.CVE>();
         }
@@ -77,14 +98,33 @@ public class NvdCveProvider : ICveDataProvider
 
         try
         {
-            var response = await _httpClient.GetStringAsync($"{_baseUrl}?resultsPerPage={limit}");
-            var nvdResponse = JsonSerializer.Deserialize<Models.NVD.NvdResponse>(response);
-            
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}?resultsPerPage={limit}");
+            req.Headers.UserAgent.ParseAdd("omama-cli/1.0");
+            using var resp = await _httpClient.SendAsync(req);
+            if (!resp.IsSuccessStatusCode || !IsJson(resp)) return Array.Empty<Models.CVE>();
+            var nvdResponse = await ReadJsonAsync<Models.NVD.NvdResponse>(resp);
             return nvdResponse?.Vulnerabilities.Select(ConvertToCve) ?? Array.Empty<Models.CVE>();
         }
-        catch (HttpRequestException)
+        catch
         {
             return Array.Empty<Models.CVE>();
+        }
+    }
+
+    public async Task<long?> GetTotalCountAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}?resultsPerPage=1");
+            req.Headers.UserAgent.ParseAdd("omama-cli/1.0");
+            using var resp = await _httpClient.SendAsync(req, cancellationToken);
+            if (!resp.IsSuccessStatusCode || !IsJson(resp)) return null;
+            var nvdResponse = await ReadJsonAsync<omama_cli.Models.NVD.NvdResponse>(resp, cancellationToken);
+            return nvdResponse?.TotalResults;
+        }
+        catch
+        {
+            return null;
         }
     }
 }

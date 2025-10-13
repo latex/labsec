@@ -9,5 +9,7 @@ public class CVE
     public string Severity { get; set; } = string.Empty;
     public DateTime PublishedDate { get; set; }
     public DateTime LastModifiedDate { get; set; }
+    // Nome da fonte que originou este CVE (ex: NVD, CIRCL)
+    public string? Source { get; set; }
     public List<string> References { get; set; } = new();
 }

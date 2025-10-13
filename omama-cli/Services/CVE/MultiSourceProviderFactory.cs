@@ -13,14 +13,9 @@ public class MultiSourceProviderFactory
 
     public IReadOnlyList<NamedCveProvider> CreateNamed()
     {
-        var list = new List<NamedCveProvider>();
-
         var http = new HttpClient();
-        if (_options.Value.EnableNvd)
-            list.Add(new NamedCveProvider("NVD", new NvdCveProvider(http, _options.Value.NvdBaseUrl)));
-        if (_options.Value.EnableCircl)
-            list.Add(new NamedCveProvider("CIRCL", new CircleCveProvider(http, _options.Value.CirclBaseUrl)));
-
-        return list;
+        var configs = SourceConfigLoader.LoadDefault();
+        var loader = new CveSourceLoader();
+        return loader.LoadSources(http, configs);
     }
 }

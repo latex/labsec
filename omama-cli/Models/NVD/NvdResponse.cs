@@ -6,6 +6,10 @@ public class NvdResponse
 {
     [JsonPropertyName("vulnerabilities")]
     public List<NvdVulnerability> Vulnerabilities { get; set; } = new();
+
+    // NVD returns pagination info including totalResults; when present we can use it for counts.
+    [JsonPropertyName("totalResults")]
+    public long? TotalResults { get; set; }
 }
 
 public class NvdVulnerability

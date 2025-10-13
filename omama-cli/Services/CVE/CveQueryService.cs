@@ -24,6 +24,36 @@ public record CveQueryResult(
 
 public class CveQueryService
 {
+    /// Conta o total de CVEs salvos por fonte no cache local
+    public async Task<Dictionary<string, int>> CountSavedBySourceAsync()
+    {
+        var cache = new HighPerformanceCache(_cacheDir);
+        var files = Directory.GetFiles(_cacheDir, "*.json.gz");
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files)
+        {
+            var key = Path.GetFileNameWithoutExtension(Path.GetFileNameWithoutExtension(file));
+            if (!key.StartsWith("cve:id:", StringComparison.OrdinalIgnoreCase))
+                continue;
+            try
+            {
+                var item = await cache.GetAsync<CVEModel>(key);
+                if (item != null)
+                {
+                    // Usa o campo Source se existir, senão "desconhecido"
+                    var source = item.Source ?? "desconhecido";
+                    if (!counts.ContainsKey(source))
+                        counts[source] = 0;
+                    counts[source]++;
+                }
+            }
+            catch
+            {
+                // Ignora entradas malformadas
+            }
+        }
+        return counts;
+    }
     private readonly string _cacheDir;
 
     public CveQueryService(string cacheDir)

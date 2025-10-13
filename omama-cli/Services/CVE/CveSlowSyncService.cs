@@ -58,6 +58,8 @@ public class CveSlowSyncService
                     var detailed = await named.Provider.GetCveByIdAsync(cve.Id);
                     if (detailed != null)
                     {
+                        // Anota a fonte para contagem posterior no cache
+                        detailed.Source = named.Name;
                         await cache.SetAsync(key, detailed);
                         Interlocked.Increment(ref saved);
                     }

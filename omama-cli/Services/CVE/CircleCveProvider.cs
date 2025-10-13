@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace omama_cli.Services.CVE;
 
-public class CircleCveProvider : ICveDataProvider
+public class CircleCveProvider : ICveDataProvider, IProvidesCveCount
 {
     private readonly HttpClient _httpClient;
     private readonly string _baseUrl;
@@ -99,6 +99,12 @@ public class CircleCveProvider : ICveDataProvider
             > 0.0 => "LOW",
             _ => "NONE"
         };
+    }
+
+    public Task<long?> GetTotalCountAsync(CancellationToken cancellationToken = default)
+    {
+        // CIRCL API doesn't expose an easy total count endpoint. Return null to indicate unknown.
+        return Task.FromResult<long?>(null);
     }
 }
 
