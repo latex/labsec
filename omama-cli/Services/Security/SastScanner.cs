@@ -53,7 +53,14 @@ public class SastScanner : ISecurityScanner
             var relativePath = Path.GetFileName(filePath);
 
             // Check for SQL injection vulnerabilities
-            if (content.Contains("ExecuteQuery") && content.Contains("+") && !content.Contains("@"))
+            var sqlKeywords = new[] { "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE" };
+            var hasSqlKeyword = sqlKeywords.Any(kw => content.Contains(kw, StringComparison.OrdinalIgnoreCase));
+            var hasStringConcatenation = content.Contains("+") || content.Contains("'\" + ");
+            var hasQueryMethod = content.Contains("query", StringComparison.OrdinalIgnoreCase) || 
+                                 content.Contains("ExecuteQuery") || 
+                                 content.Contains("execute");
+            
+            if (hasSqlKeyword && hasStringConcatenation && hasQueryMethod)
             {
                 result.Findings.Add(new SecurityFinding
                 {
