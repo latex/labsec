@@ -26,8 +26,51 @@ public class CveScanner : ISecurityScanner
             Findings = new()
         };
 
+        // Skip CVE search for URLs or file paths - CVE is meant for technology keywords
+        if (Uri.TryCreate(target, UriKind.Absolute, out _) || 
+            File.Exists(target) || 
+            Directory.Exists(target))
+        {
+            result.Findings.Add(new SecurityFinding
+            {
+                Id = $"CVE-SKIP-{Guid.NewGuid():N}",
+                Title = "CVE Scan Não Aplicável",
+                Description = "CVE scan é aplicável apenas para nomes de tecnologias ou produtos (ex: 'spring', 'log4j', 'nodejs').",
+                Severity = SeverityLevel.Info,
+                Location = target,
+                Recommendations = new List<string>
+                {
+                    "Use CVE scan com nomes de tecnologias: omama-cli scan cve --target 'spring framework'",
+                    "Para arquivos use SAST scan",
+                    "Para URLs use DAST scan"
+                }
+            });
+            return result;
+        }
+
         // Search for CVEs related to the target (could be a technology, package, or keyword)
-        var cves = await _cveProvider.SearchCvesAsync(target);
+        IEnumerable<Models.CVE> cves;
+        try
+        {
+            cves = await _cveProvider.SearchCvesAsync(target);
+        }
+        catch (Exception ex)
+        {
+            result.Findings.Add(new SecurityFinding
+            {
+                Id = $"CVE-ERROR-{Guid.NewGuid():N}",
+                Title = "Erro ao Buscar CVEs",
+                Description = $"Erro ao buscar CVEs: {ex.Message}",
+                Severity = SeverityLevel.Info,
+                Location = target,
+                Recommendations = new List<string>
+                {
+                    "Verifique sua conexão com a internet",
+                    "Tente novamente mais tarde"
+                }
+            });
+            return result;
+        }
         
         foreach (var cve in cves)
         {
