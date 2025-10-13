@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("omama-cli.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f133014cc4ca4302f652de8f4d64019ecfe42606")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fe0512fba64e0a1fabcff564e1a652488b8d4f5d")]
 [assembly: System.Reflection.AssemblyProductAttribute("omama-cli.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("omama-cli.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
