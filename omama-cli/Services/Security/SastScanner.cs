@@ -55,12 +55,18 @@ public class SastScanner : ISecurityScanner
             // Check for SQL injection vulnerabilities
             var sqlKeywords = new[] { "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE" };
             var hasSqlKeyword = sqlKeywords.Any(kw => content.Contains(kw, StringComparison.OrdinalIgnoreCase));
-            var hasStringConcatenation = content.Contains("+") || content.Contains("'\" + ");
-            var hasQueryMethod = content.Contains("query", StringComparison.OrdinalIgnoreCase) || 
-                                 content.Contains("ExecuteQuery") || 
-                                 content.Contains("execute");
             
-            if (hasSqlKeyword && hasStringConcatenation && hasQueryMethod)
+            // Look for string concatenation patterns specific to SQL queries
+            // Matches patterns like: "SELECT * FROM users WHERE id = " + variable
+            var sqlConcatPattern = @"(""[^""]*(?:SELECT|INSERT|UPDATE|DELETE)[^""]*""\s*\+)|('[^']*(?:SELECT|INSERT|UPDATE|DELETE)[^']*'\s*\+)";
+            var hasSqlStringConcatenation = System.Text.RegularExpressions.Regex.IsMatch(content, sqlConcatPattern, 
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            
+            // Look for SQL execution methods
+            var sqlExecutionMethods = new[] { "ExecuteQuery", "ExecuteNonQuery", "ExecuteScalar", "ExecuteReader", ".query(", ".execute(" };
+            var hasQueryMethod = sqlExecutionMethods.Any(m => content.Contains(m, StringComparison.OrdinalIgnoreCase));
+            
+            if (hasSqlKeyword && hasSqlStringConcatenation && hasQueryMethod)
             {
                 result.Findings.Add(new SecurityFinding
                 {
