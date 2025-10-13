@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace omama_cli.Services.CVE;
 
-public class CveDataProviderFactory
+public class CveDataProviderFactory : ICveProviderFactory
 {
     private readonly IOptions<CveProviderOptions> _options;
 
