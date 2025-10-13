@@ -8,6 +8,7 @@ public static class SourceConfigLoader
         var configs = new List<SourceConfig>();
         foreach (var src in CveSourceCatalog.All)
         {
+            // HABILITA TODOS OS SOURCES como solicitado pelo usuário
             configs.Add(new SourceConfig(src.Name, src.Url, true));
         }
         return configs;

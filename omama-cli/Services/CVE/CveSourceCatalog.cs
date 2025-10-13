@@ -16,6 +16,6 @@ public static class CveSourceCatalog
         new("WIZ", "https://www.wiz.io/pt-br/vulnerability-database"),
         new("EXPLOIT-DB", "https://www.exploit-db.com/"),
         new("IVANTI", "https://help.ivanti.com/ld/help/pt_BR/LDMS/10.0/Windows/patch-t-search-cve-name.htm"),
-        new("CIRCL", "https://api.circl.lu/v1/cve", BuiltIn: true),
+        new("CIRCL", "https://cve.circl.lu/api", BuiltIn: true),
     };
 }
