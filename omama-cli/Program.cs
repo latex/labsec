@@ -1,5 +1,6 @@
 ﻿using omama_cli.Services;
 using omama_cli.Services.CVE;
+using omama_cli.Services.Security;
 using omama_cli.Models;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
@@ -7,7 +8,7 @@ using System.Globalization;
 
 static void PrintHelp()
 {
-    Console.WriteLine("Omama CLI - Gerenciador de Diretivas");
+    Console.WriteLine("Omama CLI - Gerenciador de Diretivas e Security Lab");
     Console.WriteLine();
     Console.WriteLine("Uso:");
     Console.WriteLine("  omama-cli add --name <nome> --description <desc> --value <valor>");
@@ -18,6 +19,12 @@ static void PrintHelp()
     Console.WriteLine("  omama-cli delete --name <nome>");
     Console.WriteLine("  omama-cli sync [--keyword <kw> | --latest <n>] [--force] [--json]");
     Console.WriteLine("  omama-cli sync slow [--batch <n>] [--force] [--maxPerHour <n>] [--concurrency <n>] [--json]");
+    Console.WriteLine();
+    Console.WriteLine("Comandos de Security Lab:");
+    Console.WriteLine("  omama-cli scan --target <path|url|keyword> [--type <sast|dast|cve|all>] [--format <text|json|md>]");
+    Console.WriteLine("  omama-cli scan sast --target <path>");
+    Console.WriteLine("  omama-cli scan dast --target <url>");
+    Console.WriteLine("  omama-cli scan cve --target <keyword>");
 }
 
 static Dictionary<string, string> ParseOptions(string[] args, int startIndex)
@@ -290,6 +297,206 @@ try
                 {
                     Console.WriteLine($"- Erros: {result.Errors.Count}");
                 }
+            }
+            break;
+        }
+        case "scan":
+        {
+            // Security scanning command
+            var scanType = args.Length > 1 && !args[1].StartsWith("--") ? args[1].ToLowerInvariant() : "all";
+            var startIdx = scanType == "all" ? 1 : 2;
+            var opts = ParseOptions(args, startIdx);
+            
+            var target = opts.GetValueOrDefault("target");
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                Console.WriteLine("Erro: --target é obrigatório");
+                PrintHelp();
+                break;
+            }
+
+            var format = (opts.GetValueOrDefault("format") ?? "text").ToLowerInvariant();
+            var typeOpt = (opts.GetValueOrDefault("type") ?? scanType).ToLowerInvariant();
+
+            // Setup scanners
+            var cveOptions = Options.Create(new CveProviderOptions());
+            var factory = new CveDataProviderFactory(cveOptions);
+            var (cveProvider, _) = factory.Create();
+            string cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "omama-cli", "cache");
+
+            var scanners = new List<ISecurityScanner>();
+            
+            if (typeOpt == "all" || typeOpt == "sast")
+            {
+                scanners.Add(new SastScanner());
+            }
+            if (typeOpt == "all" || typeOpt == "dast")
+            {
+                scanners.Add(new DastScanner());
+            }
+            if (typeOpt == "all" || typeOpt == "cve")
+            {
+                scanners.Add(new CveScanner(cveProvider, cacheDir));
+            }
+
+            var securityService = new SecurityScanService(scanners);
+            List<SecurityScanResult> scanResults;
+
+            Console.WriteLine($"Iniciando security scan em: {target}");
+            Console.WriteLine($"Tipo de scan: {typeOpt}");
+            Console.WriteLine();
+
+            if (typeOpt == "all")
+            {
+                scanResults = await securityService.RunAllScansAsync(target);
+            }
+            else
+            {
+                var scanTypeEnum = typeOpt switch
+                {
+                    "sast" => ScanType.SAST,
+                    "dast" => ScanType.DAST,
+                    "cve" => ScanType.CVE,
+                    _ => ScanType.SAST
+                };
+                var singleResult = await securityService.RunScanAsync(scanTypeEnum, target);
+                scanResults = new List<SecurityScanResult> { singleResult };
+            }
+
+            var report = securityService.GenerateRecommendationReport(scanResults);
+
+            switch (format)
+            {
+                case "json":
+                    var jsonOutput = new
+                    {
+                        generatedAt = report.GeneratedAt,
+                        target = target,
+                        summary = new
+                        {
+                            total = report.TotalFindings,
+                            critical = report.CriticalCount,
+                            high = report.HighCount,
+                            medium = report.MediumCount,
+                            low = report.LowCount
+                        },
+                        scans = scanResults.Select(r => new
+                        {
+                            type = r.Type.ToString(),
+                            scanDate = r.ScanDate,
+                            findingsCount = r.TotalCount,
+                            findings = r.Findings.Select(f => new
+                            {
+                                id = f.Id,
+                                title = f.Title,
+                                description = f.Description,
+                                severity = f.Severity.ToString(),
+                                location = f.Location,
+                                recommendations = f.Recommendations,
+                                cveId = f.CveId
+                            })
+                        }),
+                        recommendations = report.PrioritizedRecommendations
+                    };
+                    Console.WriteLine(JsonSerializer.Serialize(jsonOutput, new JsonSerializerOptions { WriteIndented = true }));
+                    break;
+
+                case "md":
+                    Console.WriteLine($"# Security Scan Report");
+                    Console.WriteLine($"**Target:** {target}");
+                    Console.WriteLine($"**Generated:** {report.GeneratedAt:yyyy-MM-dd HH:mm:ss}");
+                    Console.WriteLine();
+                    Console.WriteLine($"## Summary");
+                    Console.WriteLine($"- **Total Findings:** {report.TotalFindings}");
+                    Console.WriteLine($"- **Critical:** {report.CriticalCount}");
+                    Console.WriteLine($"- **High:** {report.HighCount}");
+                    Console.WriteLine($"- **Medium:** {report.MediumCount}");
+                    Console.WriteLine($"- **Low:** {report.LowCount}");
+                    Console.WriteLine();
+                    
+                    foreach (var result in scanResults)
+                    {
+                        Console.WriteLine($"## {result.Type} Scan Results ({result.TotalCount} findings)");
+                        Console.WriteLine();
+                        foreach (var finding in result.Findings)
+                        {
+                            Console.WriteLine($"### [{finding.Severity}] {finding.Title}");
+                            Console.WriteLine();
+                            Console.WriteLine($"**Location:** {finding.Location}");
+                            Console.WriteLine();
+                            Console.WriteLine($"{finding.Description}");
+                            Console.WriteLine();
+                            if (finding.Recommendations.Any())
+                            {
+                                Console.WriteLine("**Recommendations:**");
+                                foreach (var rec in finding.Recommendations)
+                                {
+                                    Console.WriteLine($"- {rec}");
+                                }
+                                Console.WriteLine();
+                            }
+                        }
+                    }
+
+                    if (report.PrioritizedRecommendations.Any())
+                    {
+                        Console.WriteLine("## Prioritized Recommendations");
+                        Console.WriteLine();
+                        foreach (var rec in report.PrioritizedRecommendations)
+                        {
+                            Console.WriteLine(rec);
+                        }
+                    }
+                    break;
+
+                default: // text
+                    Console.WriteLine("==============================================");
+                    Console.WriteLine("       SECURITY SCAN REPORT");
+                    Console.WriteLine("==============================================");
+                    Console.WriteLine($"Target: {target}");
+                    Console.WriteLine($"Generated: {report.GeneratedAt:yyyy-MM-dd HH:mm:ss}");
+                    Console.WriteLine();
+                    Console.WriteLine("Summary:");
+                    Console.WriteLine($"  Total Findings: {report.TotalFindings}");
+                    Console.WriteLine($"  Critical: {report.CriticalCount}");
+                    Console.WriteLine($"  High: {report.HighCount}");
+                    Console.WriteLine($"  Medium: {report.MediumCount}");
+                    Console.WriteLine($"  Low: {report.LowCount}");
+                    Console.WriteLine();
+
+                    foreach (var result in scanResults)
+                    {
+                        Console.WriteLine($"--- {result.Type} Scan Results ({result.TotalCount} findings) ---");
+                        Console.WriteLine();
+                        
+                        foreach (var finding in result.Findings)
+                        {
+                            Console.WriteLine($"[{finding.Severity}] {finding.Title}");
+                            Console.WriteLine($"  Location: {finding.Location}");
+                            Console.WriteLine($"  {finding.Description}");
+                            if (finding.Recommendations.Any())
+                            {
+                                Console.WriteLine("  Recommendations:");
+                                foreach (var rec in finding.Recommendations)
+                                {
+                                    Console.WriteLine($"    - {rec}");
+                                }
+                            }
+                            Console.WriteLine();
+                        }
+                    }
+
+                    if (report.PrioritizedRecommendations.Any())
+                    {
+                        Console.WriteLine("==============================================");
+                        Console.WriteLine("     PRIORITIZED RECOMMENDATIONS");
+                        Console.WriteLine("==============================================");
+                        foreach (var rec in report.PrioritizedRecommendations)
+                        {
+                            Console.WriteLine(rec);
+                        }
+                    }
+                    break;
             }
             break;
         }
