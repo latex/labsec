@@ -143,12 +143,13 @@ public class HighPerformanceCache : IDisposable
 
     public async Task<IEnumerable<T>> GetAllCachedAsync<T>() where T : class
     {
-    var files = Directory.GetFiles(_cachePath, "*.json.gz");
+        var files = Directory.GetFiles(_cachePath, "*.json.gz");
         var results = new List<T>();
 
         foreach (var file in files)
         {
-            var key = Path.GetFileNameWithoutExtension(file);
+            // Remove both .gz and .json extensions
+            var key = Path.GetFileNameWithoutExtension(Path.GetFileNameWithoutExtension(file));
             var item = await GetAsync<T>(key);
             if (item != null)
             {
