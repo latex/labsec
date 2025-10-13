@@ -1,9 +1,9 @@
 ﻿using omama_cli.Services;
-using omama_cli.Services.CVE;
 using omama_cli.Models;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using System.Globalization;
+using omama_cli.Services.CVE;
 
 // Variável global de ambiente: "homol" ou "prod"
 var stat = Environment.GetEnvironmentVariable("OMAMA_STAT") ?? "prod";
@@ -29,6 +29,7 @@ static void PrintHelp()
     Console.WriteLine("  omama-cli sync slow [--batch <n>] [--force] [--maxPerHour <n>] [--concurrency <n>] [--json]");
     Console.WriteLine("  omama-cli stats source [--json]");
     Console.WriteLine("  omama-cli count");
+  Console.WriteLine("  omama-cli test provider <nome> [--batch N] [--curl] [--method GET|POST]");
 }
 
 static Dictionary<string, string> ParseOptions(string[] args, int startIndex)
@@ -110,6 +111,24 @@ try
                     Console.WriteLine($"- {kv.Key}: {kv.Value}");
                 }
             }
+            break;
+        }
+        case "test":
+        {
+            // Testa um provider específico: test provider <nome> [--batch N] [--curl] [--method GET|POST]
+            if (args.Length < 3)
+            {
+                Console.WriteLine("Uso: omama-cli test provider <nome> [--batch N] [--curl] [--method GET|POST]");
+                break;
+            }
+
+            var providerName = args[2].ToUpperInvariant();
+            var opts = ParseOptions(args, 3);
+            var batch = opts.TryGetValue("batch", out var batchStr) && int.TryParse(batchStr, out var batchInt) ? batchInt : 5;
+            var useCurl = opts.ContainsKey("curl");
+            var method = opts.GetValueOrDefault("method", "GET").ToUpperInvariant();
+
+            await TestProviderAsync(providerName, batch, useCurl, method);
             break;
         }
         case "add":
@@ -314,13 +333,15 @@ try
                         try
                         {
                             var stats = await slow.SyncLatestInterleavedAsync(batch, force);
-                            Log($"Fonte: {np.Name} - Verificados: {stats.Scanned}, Existentes: {stats.Existed}, Salvos: {stats.Saved}, Erros: {stats.Errors}");
+                            Log($"Fonte: {np.Name} - Verificados: {stats.Scanned}, Existentes: {stats.Existed}, Salvos: {stats.Saved}, Erros: {stats.Errors}, Duração: {stats.Duration.TotalSeconds:F2}s");
                             return new {
                                 Source = np.Name,
                                 Scanned = stats.Scanned,
                                 Existed = stats.Existed,
                                 Saved = stats.Saved,
-                                Errors = stats.Errors
+                                Errors = stats.Errors,
+                                DurationMs = stats.Duration.TotalMilliseconds,
+                                Metrics = stats.Metrics
                             };
                         }
                         catch (JsonException jex)
@@ -331,7 +352,9 @@ try
                                 Scanned = 0,
                                 Existed = 0,
                                 Saved = 0,
-                                Errors = 1
+                                Errors = 1,
+                                DurationMs = 0.0,
+                                Metrics = new Dictionary<string, object>()
                             };
                         }
                         catch (Exception ex)
@@ -342,7 +365,9 @@ try
                                 Scanned = 0,
                                 Existed = 0,
                                 Saved = 0,
-                                Errors = 1
+                                Errors = 1,
+                                DurationMs = 0.0,
+                                Metrics = new Dictionary<string, object>()
                             };
                         }
                     }
@@ -354,6 +379,9 @@ try
 
                 var syncResults = await Task.WhenAll(syncTasks);
                 results.AddRange(syncResults);
+
+                // Print telemetry at the end when in homol mode
+                omama_cli.Services.CVE.TelemetryService.PrintSummary();
 
                 if (asJson)
                 {
@@ -433,4 +461,155 @@ catch (Exception ex)
     await Console.Error.WriteLineAsync($"Erro: {ex.Message}\n");
     PrintHelp();
     Environment.ExitCode = 1;
+}
+
+static async Task TestProviderAsync(string providerName, int batch, bool useCurl, string method)
+{
+    Console.WriteLine($"[LOG] Testando provider: {providerName}");
+    
+    var configs = SourceConfigLoader.LoadDefault();
+    var loader = new CveSourceLoader();
+    var http = new HttpClient();
+    var namedProviders = loader.LoadSources(http, configs);
+    
+    var provider = namedProviders.FirstOrDefault(p => 
+        string.Equals(p.Name, providerName, StringComparison.OrdinalIgnoreCase));
+    
+    if (provider == null)
+    {
+        Console.WriteLine($"Provider '{providerName}' não encontrado.");
+        Console.WriteLine($"Providers disponíveis: {string.Join(", ", namedProviders.Select(p => p.Name))}");
+        return;
+    }
+
+    Console.WriteLine($"=== Testando Provider: {provider.Name} ===");
+    
+    // Testa curl se solicitado
+    if (useCurl)
+    {
+        await TestWithCurlAsync(provider, method);
+    }
+    
+    // Testa via provider
+    await TestProviderDirectlyAsync(provider, batch);
+
+    // Print telemetry summary when in homol mode
+    if ((Environment.GetEnvironmentVariable("OMAMA_STAT") ?? "prod") == "homol")
+    {
+        omama_cli.Services.CVE.TelemetryService.PrintSummary();
+    }
+}
+
+static async Task TestWithCurlAsync(NamedCveProvider provider, string method)
+{
+    Console.WriteLine($"\n--- Teste CURL ({method}) ---");
+    
+    // Determina URL baseada no provider
+    string testUrl = provider.Name.ToUpperInvariant() switch
+    {
+        "NVD" => "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=5",
+        "CIRCL" => "https://cve.circl.lu/api/last/5",
+        "CVE.ORG" => "https://www.cve.org/api/cve/search?q=*&limit=5",
+        "CVEDETAILS" => "https://www.cvedetails.com/json-feed.php?numrows=5",
+        "VULNERS" => "https://vulners.com/api/v3/search/lucene/?query=*&limit=5",
+        _ => "https://httpbin.org/get"
+    };
+    
+    Console.WriteLine($"[LOG] Testando URL: {testUrl}");
+    
+    var curlCommand = method == "POST" 
+        ? $"curl -X POST -H 'Content-Type: application/json' -H 'User-Agent: OMAMA-CLI/1.0' '{testUrl}'"
+        : $"curl -H 'User-Agent: OMAMA-CLI/1.0' '{testUrl}'";
+    
+    Console.WriteLine($"[LOG] Comando curl: {curlCommand}");
+    
+    var processInfo = new System.Diagnostics.ProcessStartInfo
+    {
+        FileName = "bash",
+        Arguments = $"-c \"{curlCommand} | head -20\"",
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false
+    };
+    
+    try
+    {
+        using var process = System.Diagnostics.Process.Start(processInfo);
+        if (process != null)
+        {
+            var output = await process.StandardOutput.ReadToEndAsync();
+            var error = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            
+            Console.WriteLine($"Status: {process.ExitCode}");
+            if (!string.IsNullOrEmpty(output))
+            {
+                Console.WriteLine($"Output:\n{output}");
+            }
+            if (!string.IsNullOrEmpty(error))
+            {
+                Console.WriteLine($"Error:\n{error}");
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Erro executando curl: {ex.Message}");
+    }
+}
+
+static async Task TestProviderDirectlyAsync(NamedCveProvider provider, int batch)
+{
+    Console.WriteLine($"\n--- Teste Provider Direto ---");
+    
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    
+    try
+    {
+        // Teste GetLatestCvesAsync
+        Console.WriteLine($"[LOG] Chamando GetLatestCvesAsync({batch})...");
+        var latest = await provider.Provider.GetLatestCvesAsync(batch);
+        var latestList = latest.ToList();
+        
+        Console.WriteLine($"GetLatestCves retornou: {latestList.Count} CVEs em {sw.ElapsedMilliseconds}ms");
+        
+        if (latestList.Count > 0)
+        {
+            var firstCve = latestList[0];
+            Console.WriteLine($"Primeiro CVE: {firstCve.Id} - {firstCve.Description?[..Math.Min(100, firstCve.Description.Length)]}...");
+            
+            // Teste GetCveByIdAsync
+            sw.Restart();
+            Console.WriteLine($"[LOG] Testando GetCveByIdAsync com: {firstCve.Id}");
+            var detailed = await provider.Provider.GetCveByIdAsync(firstCve.Id);
+            
+            Console.WriteLine($"GetCveById retornou: {(detailed != null ? "sucesso" : "falha")} em {sw.ElapsedMilliseconds}ms");
+            
+            if (detailed != null)
+            {
+                Console.WriteLine($"CVE detalhado: {detailed.Id} - Score: {detailed.Score} - Severity: {detailed.Severity}");
+            }
+        }
+        
+        // Teste contagem se disponível
+        if (provider.Provider is IProvidesCveCount countProvider)
+        {
+            sw.Restart();
+            Console.WriteLine("[LOG] Testando GetTotalCountAsync...");
+            var total = await countProvider.GetTotalCountAsync();
+            Console.WriteLine($"Total count: {total?.ToString() ?? "N/A"} em {sw.ElapsedMilliseconds}ms");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"ERRO testando provider: {ex.GetType().Name} - {ex.Message}");
+        if (ex.InnerException != null)
+        {
+            Console.WriteLine($"Inner: {ex.InnerException.Message}");
+        }
+    }
+    finally
+    {
+        sw.Stop();
+    }
 }
