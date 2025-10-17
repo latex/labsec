@@ -38,19 +38,21 @@ public class ParallelCveProcessorTests
     {
         // Arrange
         var mockProvider = Substitute.For<ICveDataProvider>();
-        var cts = new CancellationTokenSource();
-        var processor = new ParallelCveProcessor(4);
-        
-        mockProvider.SearchCvesAsync(Arg.Any<string>())
-            .Returns(async _ => 
-            {
-                await Task.Delay(1000); // Simula processamento longo
-                return new[] { new Models.CVE { Id = "CVE-2023-0001" } };
-            });
+        using (var cts = new CancellationTokenSource())
+        {
+            var processor = new ParallelCveProcessor(4);
+            
+            mockProvider.SearchCvesAsync(Arg.Any<string>())
+                .Returns(async _ => 
+                {
+                    await Task.Delay(1000); // Simula processamento longo
+                    return new[] { new Models.CVE { Id = "CVE-2023-0001" } };
+                });
 
-        // Act & Assert
-        cts.CancelAfter(100); // Cancela após 100ms
-        await Assert.ThrowsAsync<OperationCanceledException>(() =>
-            processor.ProcessCvesAsync("test", mockProvider, cts.Token));
+            // Act & Assert
+            cts.CancelAfter(100); // Cancela após 100ms
+            await Assert.ThrowsAsync<OperationCanceledException>(() =>
+                processor.ProcessCvesAsync("test", mockProvider, cts.Token));
+        }
     }
 }

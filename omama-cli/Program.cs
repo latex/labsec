@@ -1,9 +1,8 @@
-﻿using omama_cli.Services;
-using omama_cli.Models;
-using System.Text.Json;
-using Microsoft.Extensions.Options;
+﻿using System.Text.Json;
 using System.Globalization;
 using omama_cli.Services.CVE;
+using omama_cli.Services;
+using Microsoft.Extensions.Options;
 
 // Variável global de ambiente: "homol" ou "prod"
 var stat = Environment.GetEnvironmentVariable("OMAMA_STAT") ?? "prod";
@@ -59,6 +58,56 @@ static Dictionary<string, string> ParseOptions(string[] args, int startIndex)
 }
 
 var directiveService = new DirectiveService();
+
+static async Task HandleCountCommand(Dictionary<string, string> opts)
+{
+    var asJson = opts.ContainsKey("json");
+    var cacheDir = CachePaths.ResolveCacheDir();
+    var query = new CveQueryService(cacheDir);
+    var counts = await query.CountSavedBySourceAsync();
+
+    if (asJson)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(counts, new JsonSerializerOptions { WriteIndented = true }));
+    }
+    else
+    {
+        Console.WriteLine("Total de CVEs salvos por fonte (cache):");
+        foreach (var kv in counts.OrderByDescending(k => k.Value))
+        {
+            Console.WriteLine($"- {kv.Key}: {kv.Value}");
+        }
+    }
+}
+
+async Task HandleTestCommand(string[] args)
+{
+    // Testa um provider específico: test provider <nome> [--batch N] [--curl] [--method GET|POST]
+    if (args.Length < 3)
+    {
+        Console.WriteLine("Uso: omama-cli test provider <nome> [--batch N] [--curl] [--method GET|POST]");
+        return;
+    }
+
+    var providerName = args[2].ToUpperInvariant();
+    var opts = ParseOptions(args, 3);
+    var batch = opts.TryGetValue("batch", out var batchStr) && int.TryParse(batchStr, out var batchInt) ? batchInt : 5;
+    var useCurl = opts.ContainsKey("curl");
+    var method = opts.GetValueOrDefault("method", "GET").ToUpperInvariant();
+
+    await TestProviderAsync(providerName, batch, useCurl, method);
+}
+
+void HandleAddCommand(string[] args)
+{
+    var opts = ParseOptions(args, 1);
+    var name = opts.GetValueOrDefault("name") ?? throw new ArgumentException("--name é obrigatório");
+    var description = opts.GetValueOrDefault("description") ?? throw new ArgumentException("--description é obrigatório");
+    var value = opts.GetValueOrDefault("value") ?? throw new ArgumentException("--value é obrigatório");
+    directiveService.AddDirective(name, description, value);
+    Console.WriteLine($"Diretiva '{name}' adicionada com sucesso!");
+}
+
 static DateTimeOffset? ParseDate(string? s)
 {
     if (string.IsNullOrWhiteSpace(s)) return null;
@@ -84,53 +133,18 @@ try
     {
         var runDir = CachePaths.ResolveRunDir();
         var pidFile = Path.Combine(runDir, "omama-cli.pid");
-        File.WriteAllText(pidFile, $"{Environment.ProcessId}\n{DateTimeOffset.UtcNow:o}\n");
+    await File.WriteAllTextAsync(pidFile, $"{Environment.ProcessId}\n{DateTimeOffset.UtcNow:o}\n");
     }
     catch { /* ignore errors writing pid file */ }
 
     switch (command)
     {
         case "count":
-        {
-            // Conta os CVEs salvos em cache por fonte
-            var opts = ParseOptions(args, 1);
-            var asJson = opts.ContainsKey("json");
-            var cacheDir = CachePaths.ResolveCacheDir();
-            var query = new CveQueryService(cacheDir);
-            var counts = await query.CountSavedBySourceAsync();
-
-            if (asJson)
-            {
-                Console.WriteLine(JsonSerializer.Serialize(counts, new JsonSerializerOptions { WriteIndented = true }));
-            }
-            else
-            {
-                Console.WriteLine("Total de CVEs salvos por fonte (cache):");
-                foreach (var kv in counts.OrderByDescending(k => k.Value))
-                {
-                    Console.WriteLine($"- {kv.Key}: {kv.Value}");
-                }
-            }
+            await HandleCountCommand(ParseOptions(args, 1));
             break;
-        }
         case "test":
-        {
-            // Testa um provider específico: test provider <nome> [--batch N] [--curl] [--method GET|POST]
-            if (args.Length < 3)
-            {
-                Console.WriteLine("Uso: omama-cli test provider <nome> [--batch N] [--curl] [--method GET|POST]");
-                break;
-            }
-
-            var providerName = args[2].ToUpperInvariant();
-            var opts = ParseOptions(args, 3);
-            var batch = opts.TryGetValue("batch", out var batchStr) && int.TryParse(batchStr, out var batchInt) ? batchInt : 5;
-            var useCurl = opts.ContainsKey("curl");
-            var method = opts.GetValueOrDefault("method", "GET").ToUpperInvariant();
-
-            await TestProviderAsync(providerName, batch, useCurl, method);
+            await HandleTestCommand(args);
             break;
-        }
         case "add":
         {
             var opts = ParseOptions(args, 1);
@@ -313,7 +327,7 @@ try
                 var force = opts.ContainsKey("force");
                 var batch = opts.TryGetValue("batch", out var sb) && int.TryParse(sb, out var ib) ? Math.Max(1, ib) : 10;
                 var maxPerHour = opts.TryGetValue("maxPerHour", out var sm) && int.TryParse(sm, out var im) ? Math.Max(1, im) : 500;
-                var concurrency = opts.TryGetValue("concurrency", out var sc) && int.TryParse(sc, out var ic) ? Math.Max(1, ic) : 4;
+                // variável 'concurrency' removida
 
                 string cacheDir = CachePaths.ResolveCacheDir();
                 var configs = SourceConfigLoader.LoadDefault();
@@ -496,7 +510,7 @@ static async Task TestProviderAsync(string providerName, int batch, bool useCurl
     // Print telemetry summary when in homol mode
     if ((Environment.GetEnvironmentVariable("OMAMA_STAT") ?? "prod") == "homol")
     {
-        omama_cli.Services.CVE.TelemetryService.PrintSummary();
+        TelemetryService.PrintSummary();
     }
 }
 
@@ -507,12 +521,12 @@ static async Task TestWithCurlAsync(NamedCveProvider provider, string method)
     // Determina URL baseada no provider
     string testUrl = provider.Name.ToUpperInvariant() switch
     {
-        "NVD" => "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=5",
-        "CIRCL" => "https://cve.circl.lu/api/last/5",
-        "CVE.ORG" => "https://www.cve.org/api/cve/search?q=*&limit=5",
-        "CVEDETAILS" => "https://www.cvedetails.com/json-feed.php?numrows=5",
-        "VULNERS" => "https://vulners.com/api/v3/search/lucene/?query=*&limit=5",
-        _ => "https://httpbin.org/get"
+        "NVD" => CveSourceCatalog.NVD_URL + "?resultsPerPage=5",
+        "CIRCL" => CveSourceCatalog.CIRCL_URL + "/last/5",
+        "CVE.ORG" => CveSourceCatalog.CVEORG_URL + "/api/cve/search?q=*&limit=5",
+        "CVEDETAILS" => CveSourceCatalog.CVEDETAILS_URL + "/json-feed.php?numrows=5",
+        "VULNERS" => CveSourceCatalog.VULNERS_URL + "/api/v3/search/lucene/?query=*&limit=5",
+    _ => string.Empty
     };
     
     Console.WriteLine($"[LOG] Testando URL: {testUrl}");

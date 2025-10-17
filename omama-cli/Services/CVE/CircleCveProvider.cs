@@ -13,7 +13,9 @@ public class CircleCveProvider : ICveDataProvider, IProvidesCveCount
     public CircleCveProvider(HttpClient httpClient, string? baseUrl = null)
     {
         _httpClient = httpClient;
-        _baseUrl = baseUrl ?? "https://cve.circl.lu/api";
+        _baseUrl = baseUrl 
+            ?? Environment.GetEnvironmentVariable("CIRCL_CVE_API_BASE_URL") 
+            ?? throw new InvalidOperationException("CIRCL_CVE_API_BASE_URL environment variable is not set and no baseUrl was provided.");
         Log($"CIRCL Provider inicializado com base URL: {_baseUrl}");
     }
 

@@ -1,22 +1,25 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using CVEModel = omama_cli.Models.CVE;
 
 namespace omama_cli.Services.CVE;
 
 public class ParallelCveProcessor
 {
-    private readonly int _maxDegreeOfParallelism;
     private readonly SemaphoreSlim _throttler;
-    private readonly ConcurrentDictionary<string, Models.CVE> _processedCves;
+    private readonly ConcurrentDictionary<string, CVEModel> _processedCves;
 
     public ParallelCveProcessor(int maxDegreeOfParallelism)
     {
-        _maxDegreeOfParallelism = maxDegreeOfParallelism;
-        _throttler = new SemaphoreSlim(maxDegreeOfParallelism);
-        _processedCves = new ConcurrentDictionary<string, Models.CVE>();
+        _throttler = new SemaphoreSlim(Math.Max(1, maxDegreeOfParallelism));
+        _processedCves = new ConcurrentDictionary<string, CVEModel>();
     }
 
-    public async Task<IEnumerable<Models.CVE>> ProcessCvesAsync(
-        string keyword, 
+    public async Task<IEnumerable<CVEModel>> ProcessCvesAsync(
+        string keyword,
         ICveDataProvider provider,
         CancellationToken cancellationToken = default)
     {
@@ -24,20 +27,16 @@ public class ParallelCveProcessor
 
         try
         {
-            // Busca os CVEs iniciais
             var cves = await provider.SearchCvesAsync(keyword);
             var tasks = new List<Task>();
 
-            // Processa cada CVE em paralelo
             foreach (var cve in cves)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
                 tasks.Add(ProcessCveDetailAsync(cve.Id, provider, cancellationToken));
             }
 
             await Task.WhenAll(tasks);
-
             return _processedCves.Values;
         }
         catch (OperationCanceledException)
@@ -55,7 +54,6 @@ public class ParallelCveProcessor
         try
         {
             await _throttler.WaitAsync(cancellationToken);
-
             try
             {
                 var detailedCve = await provider.GetCveByIdAsync(cveId);
@@ -76,24 +74,17 @@ public class ParallelCveProcessor
         }
         catch (Exception ex)
         {
-            // Log erro mas continua processamento
-            Console.Error.WriteLine($"Erro ao processar CVE {cveId}: {ex.Message}");
+            await Console.Error.WriteLineAsync($"Erro ao processar CVE {cveId}: {ex.Message}");
         }
     }
 
-    private async Task EnrichCveDataAsync(Models.CVE cve, CancellationToken cancellationToken)
+    private static async Task EnrichCveDataAsync(CVEModel cve, CancellationToken cancellationToken)
     {
-        // Simula enriquecimento de dados assíncrono
-        // Aqui você pode adicionar chamadas para outras APIs ou fontes de dados
         await Task.Run(async () =>
         {
             cancellationToken.ThrowIfCancellationRequested();
-            
-            // Exemplo de enriquecimento: adiciona timestamp de processamento
             cve.LastModifiedDate = DateTime.UtcNow;
-            
-            // Simula algum processamento
-            await Task.Delay(100, cancellationToken);
+            await Task.Delay(50, cancellationToken);
         }, cancellationToken);
     }
 }
